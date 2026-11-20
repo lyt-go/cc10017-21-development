@@ -552,6 +552,41 @@ class PipelineEngine:
                 for topic_name, topic_id in topic_nodes.items():
                     edges.append({"from": topic_id, "to": kafka_id, "label": "consume"})
 
+        # 死信重放：把上游分区接到对应的下游转换节点，与流式血缘页同一份映射数据
+        from app.services.dead_letter_replay import DeadLetterReplayService
+
+        replay_service = DeadLetterReplayService()
+        known_ids = {n["id"] for n in nodes}
+        table_nodes = {n["name"]: n["id"] for n in nodes if n["type"] == "table"}
+        for edge in replay_service.lineage_replay_edges():
+            if edge["from"] not in known_ids:
+                known_ids.add(edge["from"])
+                nodes.append({
+                    "id": edge["from"], "name": edge["from"].split(":", 1)[-1],
+                    "type": "replay_partition", "module": "dead_letter",
+                    "status": "待重放",
+                })
+            transform_id = f"replay-transform-{edge['转换节点']}"
+            if transform_id not in known_ids:
+                known_ids.add(transform_id)
+                nodes.append({
+                    "id": transform_id, "name": edge["转换节点"], "type": "transform",
+                    "module": "stream_lineage", "status": "已生效",
+                    "下游表名": edge.get("下游表名"),
+                })
+                # 转换节点有同名湖表时补一条写入边，重放去向能落到具体表
+                target_table = table_nodes.get(str(edge.get("下游表名")))
+                if target_table:
+                    edges.append({
+                        "from": transform_id, "to": target_table,
+                        "label": "写入", "版本": edge.get("版本"),
+                    })
+            edges.append({
+                "from": edge["from"], "to": transform_id,
+                "label": "死信重放", "主重放": edge.get("主重放"),
+                "死信编号": edge.get("死信编号"), "版本": edge.get("版本"),
+            })
+
         flink_nodes = {n["name"]: n["id"] for n in nodes if n["type"] == "job"}
         for row in store.rows("flink_job"):
             if row.get("status") == "运行中":
@@ -586,6 +621,8 @@ class PipelineEngine:
             "compact_results": len(store.rows("compact_results")),
             "ttl_applied_log": len(store.rows("ttl_applied_log")),
             "realtime_metric_results": len(store.rows("realtime_metric_results")),
+            "dead_letter_replay_mappings": len(store.rows("dead_letter_replay_mappings")),
+            "dead_letter_replay_edges": len(store.rows("dead_letter_replay_edges")),
         }
 
         return {

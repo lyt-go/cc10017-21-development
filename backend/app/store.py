@@ -8,6 +8,17 @@ from typing import Any
 
 from app.seed import SEED_ROWS
 
+# 附属产物表：既不属于业务模块列表，也不参与模块表单流程。
+ARTIFACT_TABLES = [
+    "upsert_merge_artifacts", "iceberg_partition_specs",
+    "quality_inspection_results", "materialized_refresh_log",
+    "sink_dispatch_queue", "compact_results",
+    "ttl_applied_log", "realtime_metric_results",
+    "quality_check_results", "cdc_capture_artifacts",
+    "dead_letter_replay_mappings", "dead_letter_replay_edges",
+    "dead_letter_replay_batches",
+]
+
 
 class Store:
     def __init__(self) -> None:
@@ -30,6 +41,8 @@ class Store:
     def overview(self) -> dict[str, object]:
         modules: list[dict[str, object]] = []
         for name in self.module_names():
+            if name in ARTIFACT_TABLES:
+                continue
             rows = self.rows(name)
             modules.append({
                 "name": name,
@@ -38,13 +51,7 @@ class Store:
                 "abnormal": sum(1 for row in rows if row.get("abnormal")),
             })
         # artifact 表统计
-        artifact_names = [
-            "upsert_merge_artifacts", "iceberg_partition_specs",
-            "quality_inspection_results", "materialized_refresh_log",
-            "sink_dispatch_queue", "compact_results",
-            "ttl_applied_log", "realtime_metric_results",
-        ]
-        artifact_counts = {n: len(self.rows(n)) for n in artifact_names}
+        artifact_counts = {n: len(self.rows(n)) for n in ARTIFACT_TABLES}
         total_artifacts = sum(artifact_counts.values())
 
         cards = [

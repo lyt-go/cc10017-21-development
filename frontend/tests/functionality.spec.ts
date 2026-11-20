@@ -617,3 +617,61 @@ test('概览汇总', async ({ page }) => {
   await expect(page.locator('.stat-value').nth(1)).toBeVisible()
   // 验证概览页加载正常即可，不硬编码精确计数（取决于各模块 E2E 登记成功数）
 })
+
+test('死信重放映射：生成、中断恢复、血缘共享与唯一主重放', async ({ page, request }) => {
+  test.setTimeout(300_000)
+  const browserErrors: string[] = []
+  page.on('pageerror', e => browserErrors.push(e.message))
+  page.on('response', r => { if (r.url().includes('/api/') && r.status() >= 400) browserErrors.push(`${r.status()} ${r.url()}`) })
+
+  // 先落一套「完整映射形成」的有效版本，作为路线取舍的基线
+  await request.post('/api/dead_letter/replay/generate', {
+    data: { topic_code: 'TOPI-0001', route: '完整映射形成' },
+  })
+
+  await page.goto('/dead_letter')
+  await expect(page.getByTestId('replay-panel')).toBeVisible()
+  const mappingRows = page.locator('[data-testid^="mapping-"]')
+  await expect(mappingRows).toHaveCount(3)
+
+  // 换路线：首个节点接收只保留一条主重放边
+  await page.getByTestId('replay-route').selectOption('首个节点接收')
+  await page.getByTestId('generate-replay').click()
+  await expect(mappingRows).toHaveCount(1)
+
+  // 再换到完整映射，并在第 1 项后模拟中断
+  await page.getByTestId('replay-route').selectOption('完整映射形成')
+  await page.getByTestId('replay-interrupt').fill('1')
+  await page.getByTestId('generate-replay').click()
+  await expect(page.getByTestId('replay-message')).toContainText('中断')
+  await expect(mappingRows).toHaveCount(1)
+  const confirmedId = (await mappingRows.first().locator('td').first().innerText()).trim()
+
+  // 恢复只补未完成项：已确认映射编号保留，缺口补到 3 条
+  await page.getByTestId('resume-replay').click()
+  await expect(page.getByTestId('replay-message')).toContainText('补齐')
+  await expect(mappingRows).toHaveCount(3)
+  const mappingIds = await page.locator('[data-testid^="mapping-"] td:first-child').allInnerTexts()
+  expect(mappingIds.map((text) => text.trim())).toContain(confirmedId)
+  await expect(page.getByTestId('replay-check')).toContainText('主重放唯一')
+
+  // 每条死信只有一条主重放
+  const primaryCells = await page.locator('[data-testid^="mapping-"] td:nth-child(8)').allInnerTexts()
+  expect(primaryCells.filter((text) => text.trim() === '是')).toHaveLength(1)
+
+  // 流式血缘页读取同一份映射，并画出到转换节点的重放边
+  await page.goto('/stream_lineage')
+  await expect(page.getByTestId('lineage-replay')).toBeVisible()
+  await expect(page.locator('[data-testid^="lineage-mapping-"]')).toHaveCount(3)
+  expect(await page.locator('line.dag-edge-replay').count()).toBe(3)
+
+  // 标记重放后死信列表能说明进入哪个下游表
+  const dl = await request.get('/api/dead_letter')
+  const target = (await dl.json()).items.find((row: any) => row['原始主题'] === 'TOPI-0001' && row.status !== '已丢弃')
+  await page.goto('/dead_letter')
+  await page.getByTestId(`action-${target.id}-标记重放`).click()
+  await expect(page.getByTestId(`row-${target.id}`)).toHaveAttribute('data-status', '已重放')
+  await expect(page.getByTestId(`row-${target.id}`)).toContainText('flink-')
+
+  expect(browserErrors).toEqual([])
+})
